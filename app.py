@@ -1,65 +1,72 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+import logging
+import os
 import cv2
 import numpy as np
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fer import FER
+import uvicorn
+
+# Configuration du logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
 # Initialiser FastAPI
-app = FastAPI(title="Détection des émotions avec FER")
-
-# Ajouter CORS pour permettre les requêtes depuis Flutter
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Remplacez "*" par des domaines spécifiques en production (ex: ["https://votre-app-flutter.com"])
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+app = FastAPI(
+    title="Détection des émotions avec FER",
+    description="API pour détecter les émotions dans une image en utilisant le modèle FER.",
+    version="1.0.0"
 )
 
 # Charger le détecteur FER avec MTCNN
+detector = None
 try:
+    logger.info("🔄 Chargement du modèle FER avec MTCNN...")
     detector = FER(mtcnn=True)
-    print("Modèle FER chargé avec succès.")
+    logger.info("✅ Modèle FER chargé avec succès.")
 except Exception as e:
-    print(f"Erreur lors du chargement du modèle : {e}")
-    exit()
+    logger.error(f"❌ Erreur lors du chargement du modèle : {e}")
+    raise RuntimeError("Échec du chargement du modèle. Vérifiez l'installation de `fer`.")
 
-@app.get("/health", summary="Vérifier la santé de l'API")
-async def health_check():
-    """
-    Endpoint pour vérifier si l'API est opérationnelle et si le modèle est chargé.
-    """
-    return {"status": "ok", "model_loaded": True}
+# Endpoint principal
+@app.get("/", summary="Message d'accueil")
+async def root():
+    return {"message": "Bienvenue sur l'API de détection des émotions. Utilisez /predict pour envoyer une image."}
+
+# Endpoint de vérification de l'état
+@app.get("/health", summary="Vérification de l'état de l'API")
+async def health():
+    return {"model_loaded": detector is not None, "status": "healthy"}
 
 @app.post("/predict", summary="Détecter les émotions dans une image")
 async def predict_emotion(file: UploadFile = File(...)):
     """
     Accepte une image et renvoie les émotions détectées avec leurs annotations.
     """
-    try:
-        # Vérifier le type de fichier
-        if not file.content_type.startswith('image/'):
-            raise HTTPException(status_code=400, detail="Le fichier doit être une image")
+    logger.info("📷 Réception d'une image pour analyse...")
+    
+    # Vérification du format du fichier
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Le fichier doit être une image valide.")
 
+    try:
         # Lire l'image envoyée
         contents = await file.read()
-        if not contents:
-            raise HTTPException(status_code=400, detail="Fichier image vide")
-
         nparr = np.frombuffer(contents, np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
         if frame is None:
-            raise HTTPException(status_code=400, detail="Impossible de décoder l'image")
+            raise HTTPException(status_code=400, detail="Image invalide")
 
         # Convertir en RGB pour FER
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
         # Détecter les émotions
+        logger.info("🔍 Analyse des émotions...")
         result = detector.detect_emotions(frame_rgb)
 
         # Formater les résultats
         if not result:
+            logger.warning("⚠️ Aucun visage détecté dans l'image.")
             return {"message": "Aucun visage détecté", "emotions": []}
 
         formatted_result = []
@@ -86,9 +93,15 @@ async def predict_emotion(file: UploadFile = File(...)):
                 "score": float(score)
             })
 
+        logger.info(f"✅ Émotion dominante détectée : {dominant_emotion}")
         return {"emotions": formatted_result}
 
-    except HTTPException as http_exc:
-        raise http_exc
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur lors de l'analyse de l'image : {str(e)}")
+        logger.error(f"❌ Erreur lors de l'analyse de l'image : {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur : {str(e)}")
+
+# Lancement du serveur
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 10000))  # Utiliser la variable PORT de Render, avec 10000 comme fallback
+    logger.info(f"🚀 Lancement de l'API sur le port {port}...")
+    uvicorn.run(app, host="0.0.0.0", port=port)
