@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional
 import imghdr
+import uvicorn
 
 # Configuration initiale
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppression des warnings TensorFlow
@@ -17,7 +18,7 @@ app = FastAPI()
 
 detector = None
 
-
+# Événements de démarrage et arrêt
 async def startup_event():
     global detector
     try:
@@ -27,14 +28,11 @@ async def startup_event():
         logging.error(f"❌ Erreur lors du chargement du modèle : {str(e)}")
         raise
 
-
 async def shutdown_event():
     pass
 
-
 app.add_event_handler("startup", startup_event)
 app.add_event_handler("shutdown", shutdown_event)
-
 
 # Modèle Pydantic pour la réponse
 class EmotionBox(BaseModel):
@@ -43,23 +41,20 @@ class EmotionBox(BaseModel):
     width: int
     height: int
 
-
 class FaceEmotion(BaseModel):
     box: EmotionBox
     dominant_emotion: str
     score: float
     all_emotions: dict
 
-
 class EmotionResponse(BaseModel):
     emotions: List[FaceEmotion]
     message: Optional[str] = None
 
-
+# Routes
 @app.get("/", response_model=dict)
 async def root():
     return {"message": "Bienvenue sur l'API de détection d'émotions!"}
-
 
 @app.post("/detect_emotion", response_model=EmotionResponse)
 async def detect_emotion(file: UploadFile = File(...)):
@@ -104,7 +99,7 @@ async def detect_emotion(file: UploadFile = File(...)):
         logging.error(f"Erreur lors de la détection : {str(e)}", exc_info=True)
         raise HTTPException(500, "Erreur interne du serveur")
 
-
+# Fonction de test avec webcam (non exposée via l'API)
 def test_webcam():
     """Test local avec la webcam - Non exposé via l'API"""
     cap = cv2.VideoCapture(0)
@@ -142,17 +137,16 @@ def test_webcam():
         cap.release()
         cv2.destroyAllWindows()
 
-
-if _name_ == "_main_":
+# Point d'entrée principal
+if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="API de détection d'émotions")
     parser.add_argument("--webcam", action="store_true", help="Lancer le test webcam")
     args = parser.parse_args()
 
     if args.webcam:
         test_webcam()
     else:
-        import uvicorn
-
-        uvicorn.run(app, host="localhost", port=8000)
+        # Exécution locale sur localhost:8000
+        uvicorn.run(app, host="localhost", port=8000)
