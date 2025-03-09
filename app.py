@@ -7,7 +7,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional
-from imghdr_redux import what as imghdr_what
+import puremagic
 import uvicorn
 
 # Configuration initiale
@@ -64,10 +64,10 @@ async def detect_emotion(file: UploadFile = File(...)):
         raise HTTPException(400, "Fichier non supporté - Uniquement les images sont acceptées")
 
     try:
-        # Vérification du format de l'image
+        # Vérification du format de l'image avec puremagic
         image_data = await file.read()
-        image_type = imghdr_what(None, h=image_data)
-        if not image_type:
+        image_types = puremagic.magic_string(image_data)
+        if not image_types or not any(t.mime_type.startswith('image/') for t in image_types):
             raise HTTPException(400, "Format d'image invalide")
 
         # Conversion en tableau numpy
