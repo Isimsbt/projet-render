@@ -1,107 +1,158 @@
-import logging
 import os
+import logging
 import cv2
 import numpy as np
-from fastapi import FastAPI, UploadFile, File, HTTPException
 from fer import FER
-import uvicorn
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from typing import List, Optional
+import imghdr
 
-# Configuration du logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
+# Configuration initiale
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppression des warnings TensorFlow
+logging.basicConfig(level=logging.INFO)
 
-# Initialiser FastAPI
-app = FastAPI(
-    title="Détection des émotions avec FER",
-    description="API pour détecter les émotions dans une image en utilisant le modèle FER.",
-    version="1.0.0"
-)
+app = FastAPI()
 
-# Charger le détecteur FER avec MTCNN
 detector = None
-try:
-    logger.info("🔄 Chargement du modèle FER avec MTCNN...")
-    detector = FER(mtcnn=True)
-    logger.info("✅ Modèle FER chargé avec succès.")
-except Exception as e:
-    logger.error(f"❌ Erreur lors du chargement du modèle : {e}")
-    raise RuntimeError("Échec du chargement du modèle. Vérifiez l'installation de `fer`.")
 
-# Endpoint principal
-@app.get("/", summary="Message d'accueil")
+
+async def startup_event():
+    global detector
+    try:
+        detector = FER(mtcnn=True)
+        logging.info("✅ Modèle FER chargé avec succès")
+    except Exception as e:
+        logging.error(f"❌ Erreur lors du chargement du modèle : {str(e)}")
+        raise
+
+
+async def shutdown_event():
+    pass
+
+
+app.add_event_handler("startup", startup_event)
+app.add_event_handler("shutdown", shutdown_event)
+
+
+# Modèle Pydantic pour la réponse
+class EmotionBox(BaseModel):
+    x: int
+    y: int
+    width: int
+    height: int
+
+
+class FaceEmotion(BaseModel):
+    box: EmotionBox
+    dominant_emotion: str
+    score: float
+    all_emotions: dict
+
+
+class EmotionResponse(BaseModel):
+    emotions: List[FaceEmotion]
+    message: Optional[str] = None
+
+
+@app.get("/", response_model=dict)
 async def root():
-    return {"message": "Bienvenue sur l'API de détection des émotions. Utilisez /predict pour envoyer une image."}
+    return {"message": "Bienvenue sur l'API de détection d'émotions!"}
 
-# Endpoint de vérification de l'état
-@app.get("/health", summary="Vérification de l'état de l'API")
-async def health():
-    return {"model_loaded": detector is not None, "status": "healthy"}
 
-@app.post("/predict", summary="Détecter les émotions dans une image")
-async def predict_emotion(file: UploadFile = File(...)):
-    """
-    Accepte une image et renvoie les émotions détectées avec leurs annotations.
-    """
-    logger.info("📷 Réception d'une image pour analyse...")
-    
-    # Vérification du format du fichier
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Le fichier doit être une image valide.")
+@app.post("/detect_emotion", response_model=EmotionResponse)
+async def detect_emotion(file: UploadFile = File(...)):
+    """Détecte les émotions dans une image téléchargée"""
+    # Validation du fichier image
+    if not file.content_type.startswith('image/'):
+        raise HTTPException(400, "Fichier non supporté - Uniquement les images sont acceptées")
 
     try:
-        # Lire l'image envoyée
-        contents = await file.read()
-        nparr = np.frombuffer(contents, np.uint8)
+        # Vérification du format de l'image
+        image_data = await file.read()
+        image_type = imghdr.what(None, h=image_data)
+        if not image_type:
+            raise HTTPException(400, "Format d'image invalide")
+
+        # Conversion en tableau numpy
+        nparr = np.frombuffer(image_data, np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
         if frame is None:
-            raise HTTPException(status_code=400, detail="Image invalide")
+            raise HTTPException(400, "Impossible de décoder l'image")
 
-        # Convertir en RGB pour FER
+        # Détection des émotions
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = detector.detect_emotions(frame_rgb)
 
-        # Détecter les émotions
-        logger.info("🔍 Analyse des émotions...")
-        result = detector.detect_emotions(frame_rgb)
+        # Formatage de la réponse
+        emotions = []
+        for face in results:
+            box = EmotionBox(**dict(zip(['x', 'y', 'width', 'height'], face['box'])))
+            emotions_dict = face['emotions']
+            dominant = max(emotions_dict, key=emotions_dict.get)
+            emotions.append(FaceEmotion(
+                box=box,
+                dominant_emotion=dominant,
+                score=emotions_dict[dominant],
+                all_emotions=emotions_dict
+            ))
 
-        # Formater les résultats
-        if not result:
-            logger.warning("⚠️ Aucun visage détecté dans l'image.")
-            return {"message": "Aucun visage détecté", "emotions": []}
-
-        formatted_result = []
-        for face in result:
-            # Coordonnées du visage
-            (x, y, w, h) = face["box"]
-            # Landmarks
-            landmarks = face.get("keypoints", {})
-            # Émotions
-            emotions = face["emotions"]
-            dominant_emotion = max(emotions, key=emotions.get)
-            score = emotions[dominant_emotion]
-
-            formatted_result.append({
-                "box": {"x": x, "y": y, "width": w, "height": h},
-                "landmarks": {
-                    "left_eye": landmarks.get("left_eye", [0, 0]),
-                    "right_eye": landmarks.get("right_eye", [0, 0]),
-                    "mouth_left": landmarks.get("mouth_left", [0, 0]),
-                    "mouth_right": landmarks.get("mouth_right", [0, 0])
-                },
-                "emotions": emotions,
-                "dominant_emotion": dominant_emotion,
-                "score": float(score)
-            })
-
-        logger.info(f"✅ Émotion dominante détectée : {dominant_emotion}")
-        return {"emotions": formatted_result}
+        return EmotionResponse(emotions=emotions, message="Détection réussie")
 
     except Exception as e:
-        logger.error(f"❌ Erreur lors de l'analyse de l'image : {e}")
-        raise HTTPException(status_code=500, detail=f"Erreur : {str(e)}")
+        logging.error(f"Erreur lors de la détection : {str(e)}", exc_info=True)
+        raise HTTPException(500, "Erreur interne du serveur")
 
-# Lancement du serveur
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 10000))  # Utiliser la variable PORT de Render, avec 10000 comme fallback
-    logger.info(f"🚀 Lancement de l'API sur le port {port}...")
-    uvicorn.run(app, host="0.0.0.0", port=port)
+
+def test_webcam():
+    """Test local avec la webcam - Non exposé via l'API"""
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        logging.error("Impossible d'accéder à la webcam")
+        return
+
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = detector.detect_emotions(frame_rgb)
+
+            for face in results:
+                (x, y, w, h) = face['box']
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+                emotions = face['emotions']
+                dominant = max(emotions, key=emotions.get)
+                score = emotions[dominant]
+
+                label = f"{dominant} ({score:.1%})"
+                cv2.putText(frame, label, (x, y - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                            (0, 0, 255), 2)
+
+            cv2.imshow('Détection en temps réel (Appuyez sur Q pour quitter)', frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+
+
+if _name_ == "_main_":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--webcam", action="store_true", help="Lancer le test webcam")
+    args = parser.parse_args()
+
+    if args.webcam:
+        test_webcam()
+    else:
+        import uvicorn
+
+        uvicorn.run(app, host="localhost", port=8000)
