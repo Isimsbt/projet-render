@@ -1,10 +1,20 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 import cv2
 import numpy as np
 from fer import FER
 
 # Initialiser FastAPI
 app = FastAPI(title="Détection des émotions avec FER")
+
+# Ajouter CORS pour permettre les requêtes depuis Flutter
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Remplacez "*" par des domaines spécifiques en production (ex: ["https://votre-app-flutter.com"])
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Charger le détecteur FER avec MTCNN
 try:
@@ -14,19 +24,33 @@ except Exception as e:
     print(f"Erreur lors du chargement du modèle : {e}")
     exit()
 
+@app.get("/health", summary="Vérifier la santé de l'API")
+async def health_check():
+    """
+    Endpoint pour vérifier si l'API est opérationnelle et si le modèle est chargé.
+    """
+    return {"status": "ok", "model_loaded": True}
+
 @app.post("/predict", summary="Détecter les émotions dans une image")
 async def predict_emotion(file: UploadFile = File(...)):
     """
     Accepte une image et renvoie les émotions détectées avec leurs annotations.
     """
     try:
+        # Vérifier le type de fichier
+        if not file.content_type.startswith('image/'):
+            raise HTTPException(status_code=400, detail="Le fichier doit être une image")
+
         # Lire l'image envoyée
         contents = await file.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Fichier image vide")
+
         nparr = np.frombuffer(contents, np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
         if frame is None:
-            raise HTTPException(status_code=400, detail="Image invalide")
+            raise HTTPException(status_code=400, detail="Impossible de décoder l'image")
 
         # Convertir en RGB pour FER
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -64,5 +88,7 @@ async def predict_emotion(file: UploadFile = File(...)):
 
         return {"emotions": formatted_result}
 
+    except HTTPException as http_exc:
+        raise http_exc
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur : {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors de l'analyse de l'image : {str(e)}")
