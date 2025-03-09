@@ -7,7 +7,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional
-import imghdr
+from imghdr_redux import what as imghdr_what
 import uvicorn
 
 # Configuration initiale
@@ -66,7 +66,7 @@ async def detect_emotion(file: UploadFile = File(...)):
     try:
         # Vérification du format de l'image
         image_data = await file.read()
-        image_type = imghdr.what(None, h=image_data)
+        image_type = imghdr_what(None, h=image_data)
         if not image_type:
             raise HTTPException(400, "Format d'image invalide")
 
