@@ -7,20 +7,17 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional
-import uvicorn
+import imghdr
 
-# Configuration de logging
+# Configuration initiale
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppression des warnings TensorFlow
 logging.basicConfig(level=logging.INFO)
 
-# Initialisation de l'application FastAPI
 app = FastAPI()
 
-# Initialisation du détecteur d'émotions
 detector = None
 
-# Événements de démarrage et arrêt
-@app.on_event("startup")
+
 async def startup_event():
     global detector
     try:
@@ -28,18 +25,24 @@ async def startup_event():
         logging.info("✅ Modèle FER chargé avec succès")
     except Exception as e:
         logging.error(f"❌ Erreur lors du chargement du modèle : {str(e)}")
-        raise RuntimeError("Erreur lors du chargement du modèle FER")
+        raise
 
-@app.on_event("shutdown")
+
 async def shutdown_event():
-    logging.info("🛑 API arrêtée proprement")
+    pass
 
-# Modèles Pydantic pour la réponse
+
+app.add_event_handler("startup", startup_event)
+app.add_event_handler("shutdown", shutdown_event)
+
+
+# Modèle Pydantic pour la réponse
 class EmotionBox(BaseModel):
     x: int
     y: int
     width: int
     height: int
+
 
 class FaceEmotion(BaseModel):
     box: EmotionBox
@@ -47,38 +50,42 @@ class FaceEmotion(BaseModel):
     score: float
     all_emotions: dict
 
+
 class EmotionResponse(BaseModel):
     emotions: List[FaceEmotion]
     message: Optional[str] = None
 
-# Route d'accueil
+
 @app.get("/", response_model=dict)
 async def root():
     return {"message": "Bienvenue sur l'API de détection d'émotions!"}
 
-# Route de détection d'émotions
+
 @app.post("/detect_emotion", response_model=EmotionResponse)
 async def detect_emotion(file: UploadFile = File(...)):
     """Détecte les émotions dans une image téléchargée"""
-
-    # Vérification du format du fichier
+    # Validation du fichier image
     if not file.content_type.startswith('image/'):
-        raise HTTPException(400, "Seules les images sont acceptées")
+        raise HTTPException(400, "Fichier non supporté - Uniquement les images sont acceptées")
 
     try:
-        # Lecture de l'image
+        # Vérification du format de l'image
         image_data = await file.read()
+        image_type = imghdr.what(None, h=image_data)
+        if not image_type:
+            raise HTTPException(400, "Format d'image invalide")
+
+        # Conversion en tableau numpy
         nparr = np.frombuffer(image_data, np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
         if frame is None:
             raise HTTPException(400, "Impossible de décoder l'image")
 
-        # Conversion en RGB pour le détecteur FER
+        # Détection des émotions
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = detector.detect_emotions(frame_rgb)
 
-        # Formatage des résultats
+        # Formatage de la réponse
         emotions = []
         for face in results:
             box = EmotionBox(**dict(zip(['x', 'y', 'width', 'height'], face['box'])))
@@ -97,7 +104,7 @@ async def detect_emotion(file: UploadFile = File(...)):
         logging.error(f"Erreur lors de la détection : {str(e)}", exc_info=True)
         raise HTTPException(500, "Erreur interne du serveur")
 
-# Test avec la webcam (local uniquement)
+
 def test_webcam():
     """Test local avec la webcam - Non exposé via l'API"""
     cap = cv2.VideoCapture(0)
@@ -135,16 +142,17 @@ def test_webcam():
         cap.release()
         cv2.destroyAllWindows()
 
-# Point d'entrée principal
-if __name__ == "__main__":
+
+if _name_ == "_main_":
     import argparse
 
-    parser = argparse.ArgumentParser(description="API de détection d'émotions")
+    parser = argparse.ArgumentParser()
     parser.add_argument("--webcam", action="store_true", help="Lancer le test webcam")
     args = parser.parse_args()
 
     if args.webcam:
         test_webcam()
     else:
-        # Lancement de l'API en local
-        uvicorn.run(app, host="127.0.0.1", port=8000)
+        import uvicorn
+
+        uvicorn.run(app, host="localhost", port=8000)
