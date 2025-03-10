@@ -8,9 +8,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional
 import uvicorn
+import tensorflow as tf
 
-# Configuration de logging
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppression des warnings TensorFlow
+# Suppress TensorFlow warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+tf.get_logger().setLevel('ERROR')
 logging.basicConfig(level=logging.INFO)
 
 # Initialisation de l'application FastAPI
@@ -19,16 +21,20 @@ app = FastAPI()
 # Initialisation du détecteur d'émotions
 detector = None
 
-# Événements de démarrage et arrêt
-@app.on_event("startup")
-async def startup_event():
+# Fonction pour initialiser le détecteur
+def initialize_detector():
     global detector
     try:
         detector = FER(mtcnn=True)
         logging.info("✅ Modèle FER chargé avec succès")
     except Exception as e:
         logging.error(f"❌ Erreur lors du chargement du modèle : {str(e)}")
-        raise RuntimeError("Erreur lors du chargement du modèle FER")
+        raise RuntimeError(f"Erreur lors du chargement du modèle FER: {str(e)}")
+
+# Événements de démarrage et arrêt
+@app.on_event("startup")
+async def startup_event():
+    initialize_detector()
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -52,21 +58,23 @@ class EmotionResponse(BaseModel):
     message: Optional[str] = None
 
 # Route d'accueil
-@app.get("/", response_model=dict)
+@app.route("/", methods=["GET", "HEAD"])
 async def root():
     return {"message": "Bienvenue sur l'API de détection d'émotions!"}
+
+# Route de santé
+@app.get("/health", response_model=dict)
+async def health_check():
+    return {"status": "healthy"}
 
 # Route de détection d'émotions
 @app.post("/detect_emotion", response_model=EmotionResponse)
 async def detect_emotion(file: UploadFile = File(...)):
     """Détecte les émotions dans une image téléchargée"""
-
-    # Vérification du format du fichier
     if not file.content_type.startswith('image/'):
         raise HTTPException(400, "Seules les images sont acceptées")
 
     try:
-        # Lecture de l'image
         image_data = await file.read()
         nparr = np.frombuffer(image_data, np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -74,11 +82,9 @@ async def detect_emotion(file: UploadFile = File(...)):
         if frame is None:
             raise HTTPException(400, "Impossible de décoder l'image")
 
-        # Conversion en RGB pour le détecteur FER
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = detector.detect_emotions(frame_rgb)
 
-        # Formatage des résultats
         emotions = []
         for face in results:
             box = EmotionBox(**dict(zip(['x', 'y', 'width', 'height'], face['box'])))
@@ -100,12 +106,17 @@ async def detect_emotion(file: UploadFile = File(...)):
 # Test avec la webcam (local uniquement)
 def test_webcam():
     """Test local avec la webcam - Non exposé via l'API"""
+    if detector is None:
+        logging.error("Detector is None. Initialization failed.")
+        return
+
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         logging.error("Impossible d'accéder à la webcam")
         return
 
     try:
+        frame_count = 0
         while True:
             ret, frame = cap.read()
             if not ret:
@@ -116,24 +127,22 @@ def test_webcam():
 
             for face in results:
                 (x, y, w, h) = face['box']
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-
                 emotions = face['emotions']
                 dominant = max(emotions, key=emotions.get)
                 score = emotions[dominant]
+                logging.info(f"Frame {frame_count}: Face detected at box ({x}, {y}, {w}, {h})")
+                logging.info(f"Frame {frame_count}: Dominant emotion: {dominant} (Score: {score:.1%})")
 
-                label = f"{dominant} ({score:.1%})"
-                cv2.putText(frame, label, (x, y - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8,
-                            (0, 0, 255), 2)
-
-            cv2.imshow('Détection en temps réel (Appuyez sur Q pour quitter)', frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            frame_count += 1
+            if frame_count >= 100:
                 break
+
+            import time
+            time.sleep(0.1)
 
     finally:
         cap.release()
-        cv2.destroyAllWindows()
+        logging.info("Webcam test completed.")
 
 # Point d'entrée principal
 if __name__ == "__main__":
@@ -144,7 +153,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.webcam:
+        initialize_detector()
         test_webcam()
     else:
-        # Lancement de l'API en local
-                uvicorn.run(app, host="localhost",port=8000)
+        port = int(os.getenv("PORT", 8000))
+        uvicorn.run(app, host="0.0.0.0", port=port)
