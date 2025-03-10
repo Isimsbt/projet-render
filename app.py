@@ -7,18 +7,20 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional
-import puremagic
 import uvicorn
 
-# Configuration initiale
+# Configuration de logging
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppression des warnings TensorFlow
 logging.basicConfig(level=logging.INFO)
 
+# Initialisation de l'application FastAPI
 app = FastAPI()
 
+# Initialisation du détecteur d'émotions
 detector = None
 
 # Événements de démarrage et arrêt
+@app.on_event("startup")
 async def startup_event():
     global detector
     try:
@@ -26,15 +28,13 @@ async def startup_event():
         logging.info("✅ Modèle FER chargé avec succès")
     except Exception as e:
         logging.error(f"❌ Erreur lors du chargement du modèle : {str(e)}")
-        raise
+        raise RuntimeError("Erreur lors du chargement du modèle FER")
 
+@app.on_event("shutdown")
 async def shutdown_event():
-    pass
+    logging.info("🛑 API arrêtée proprement")
 
-app.add_event_handler("startup", startup_event)
-app.add_event_handler("shutdown", shutdown_event)
-
-# Modèle Pydantic pour la réponse
+# Modèles Pydantic pour la réponse
 class EmotionBox(BaseModel):
     x: int
     y: int
@@ -51,36 +51,34 @@ class EmotionResponse(BaseModel):
     emotions: List[FaceEmotion]
     message: Optional[str] = None
 
-# Routes
+# Route d'accueil
 @app.get("/", response_model=dict)
 async def root():
     return {"message": "Bienvenue sur l'API de détection d'émotions!"}
 
+# Route de détection d'émotions
 @app.post("/detect_emotion", response_model=EmotionResponse)
 async def detect_emotion(file: UploadFile = File(...)):
     """Détecte les émotions dans une image téléchargée"""
-    # Validation du fichier image
+
+    # Vérification du format du fichier
     if not file.content_type.startswith('image/'):
-        raise HTTPException(400, "Fichier non supporté - Uniquement les images sont acceptées")
+        raise HTTPException(400, "Seules les images sont acceptées")
 
     try:
-        # Vérification du format de l'image avec puremagic
+        # Lecture de l'image
         image_data = await file.read()
-        image_types = puremagic.magic_string(image_data)
-        if not image_types or not any(t.mime_type.startswith('image/') for t in image_types):
-            raise HTTPException(400, "Format d'image invalide")
-
-        # Conversion en tableau numpy
         nparr = np.frombuffer(image_data, np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
         if frame is None:
             raise HTTPException(400, "Impossible de décoder l'image")
 
-        # Détection des émotions
+        # Conversion en RGB pour le détecteur FER
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = detector.detect_emotions(frame_rgb)
 
-        # Formatage de la réponse
+        # Formatage des résultats
         emotions = []
         for face in results:
             box = EmotionBox(**dict(zip(['x', 'y', 'width', 'height'], face['box'])))
@@ -99,7 +97,7 @@ async def detect_emotion(file: UploadFile = File(...)):
         logging.error(f"Erreur lors de la détection : {str(e)}", exc_info=True)
         raise HTTPException(500, "Erreur interne du serveur")
 
-# Fonction de test avec webcam (non exposée via l'API)
+# Test avec la webcam (local uniquement)
 def test_webcam():
     """Test local avec la webcam - Non exposé via l'API"""
     cap = cv2.VideoCapture(0)
@@ -148,5 +146,5 @@ if __name__ == "__main__":
     if args.webcam:
         test_webcam()
     else:
-        # Exécution locale sur localhost:8000
-        uvicorn.run(app, host="localhost", port=8000)
+        # Lancement de l'API en local
+        uvicorn.run(app, host="127.0.0.1", port=8000)
